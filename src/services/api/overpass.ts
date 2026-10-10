@@ -1,4 +1,4 @@
-import { isGeoPoint } from '../../lib/geo';
+import { distanceMeters, isGeoPoint } from '../../lib/geo';
 import type { GeoPoint } from '../../types/firestore';
 //Overpass API で周辺の店舗を取得する
 //外部APIの呼び出しのみを担い、Firestore には触れない
@@ -56,7 +56,7 @@ function buildOverpassQuery(center: GeoPoint): string {
   return [
     `[out:json][timeout:${QUERY_TIMEOUT_SECONDS}];`,
     `node["shop"](around:${SEARCH_RADIUS_METERS},${center.latitude},${center.longitude});`,
-    `out body ${MAX_STORES};`,
+    'out body;',
   ].join('');
 }
 
@@ -83,12 +83,16 @@ function toStoreCandidate(element: OverpassElement): StoreCandidate | null {
   };
 }
 
-//応答から店舗の候補を取り出す
-function parseOverpassElements(body: OverpassResponse): StoreCandidate[] {
+//応答から近い順に店舗の候補を取り出す
+function parseOverpassElements(body: OverpassResponse, center: GeoPoint): StoreCandidate[] {
   const elements = Array.isArray(body.elements) ? (body.elements as OverpassElement[]) : [];
   return elements
     .map(toStoreCandidate)
-    .filter((candidate): candidate is StoreCandidate => candidate !== null);
+    .filter((candidate): candidate is StoreCandidate => candidate !== null)
+    .map(candidate => ({ candidate, distance: distanceMeters(center, candidate.location) }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, MAX_STORES)
+    .map(entry => entry.candidate);
 }
 
 async function fetchFromServer(url: string, query: string): Promise<OverpassResponse> {
@@ -128,7 +132,7 @@ export async function fetchNearbyCandidates(center: GeoPoint): Promise<StoreCand
       const startedAt = Date.now();
       try {
         const body = await fetchFromServer(url, query);
-        return parseOverpassElements(body);
+        return parseOverpassElements(body, center);
       } catch (error) {
         console.warn(`[overpass] ${url} failed ms=${Date.now() - startedAt}`, error);
         lastError = error;

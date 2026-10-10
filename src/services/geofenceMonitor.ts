@@ -38,11 +38,31 @@ function cancelRetry(): void {
   }
 }
 
+//登録後に進入を検知する
+function scheduleSearch(familyId: string, uid: string, location: GeoPoint, delayMs: number): void {
+  cancelRetry();
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void handleMoved(familyId, uid, location).then(registered => {
+      if (registered) {
+        return checkStores(familyId, uid, location);
+      }
+    });
+  }, delayMs);
+}
+
 //店舗ごとに最後に通知した時刻
 const lastNotifiedTimes = new Map<string, number>();
 
-//今いる店舗
+//通知した店舗
 const insideStoreIds = new Set<string>();
+
+const REEVALUATE_INTERVAL_MS = 60 * 1000;
+
+const lastEvaluatedTimes = new Map<string, number>();
+
+//判断中の店舗
+const evaluatingStoreIds = new Set<string>();
 
 type MonitorState = {
   insideStoreIds: string[];
@@ -110,7 +130,7 @@ function shouldSearch(location: GeoPoint): boolean {
 }
 
 //周辺の店舗を取得してジオフェンスを登録し直す
-async function handleMoved(familyId: string, location: GeoPoint): Promise<boolean> {
+async function handleMoved(familyId: string, uid: string, location: GeoPoint): Promise<boolean> {
   if (searching) {
     pendingLocation = location;
     return false;
@@ -120,8 +140,11 @@ async function handleMoved(familyId: string, location: GeoPoint): Promise<boolea
     return false;
   }
 
+  //間隔が空くまで待ち、最新の位置で検索する
   const now = Date.now();
-  if (now - lastSearchAttemptTime < SEARCH_RETRY_INTERVAL_MS) {
+  const waitMs = SEARCH_RETRY_INTERVAL_MS - (now - lastSearchAttemptTime);
+  if (waitMs > 0) {
+    scheduleSearch(familyId, uid, location, waitMs);
     return false;
   }
   lastSearchAttemptTime = now;
@@ -155,27 +178,27 @@ async function handleMoved(familyId: string, location: GeoPoint): Promise<boolea
     }
     const stores = await searchNearbyStores(familyId, location, candidates);
 
-    //指定店舗を新しく登録する
+    //指定店舗を近い順に登録する
     const preferredIds = new Set(
       items
         .filter(item => item.status !== 'completed' && item.preferredStoreId !== null)
         .map(item => item.preferredStoreId as string),
     );
-    const foundIds = new Set(stores.map(store => store.storeId));
     const preferred = saved
-      .filter(store => preferredIds.has(store.id) && !foundIds.has(store.id))
+      .filter(store => preferredIds.has(store.id))
       .map(toNearbyStore);
-    await replaceStoreGeofences([...preferred, ...stores].slice(0, MAX_GEOFENCES), radius);
+    const merged = new Map<string, NearbyStore>();
+    [...nearby, ...stores].forEach(store => merged.set(store.storeId, store));
+    const others = [...merged.values()]
+      .filter(store => !preferredIds.has(store.storeId))
+      .sort((a, b) => distanceMeters(location, a.location) - distanceMeters(location, b.location));
+    await replaceStoreGeofences([...preferred, ...others].slice(0, MAX_GEOFENCES), radius);
     lastSearchCenter = location;
     persistState();
     cancelRetry();
   } catch (error) {
     console.warn('geofenceMonitor: 周辺検索に失敗。保存済みの店舗を維持します', error);
-    cancelRetry();
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      void handleMoved(familyId, location);
-    }, SEARCH_RETRY_DELAY_MS);
+    scheduleSearch(familyId, uid, location, SEARCH_RETRY_DELAY_MS);
   } finally {
     searching = false;
   }
@@ -183,7 +206,7 @@ async function handleMoved(familyId: string, location: GeoPoint): Promise<boolea
   const next = pendingLocation;
   pendingLocation = null;
   if (next !== null) {
-    await handleMoved(familyId, next);
+    await handleMoved(familyId, uid, next);
   }
   return true;
 }
@@ -235,22 +258,26 @@ async function handleStoreEntered(
   store: NearbyStore,
 ): Promise<void> {
 
-  if (insideStoreIds.has(store.storeId)) {
+  if (insideStoreIds.has(store.storeId) || evaluatingStoreIds.has(store.storeId)) {
     return;
   }
-  insideStoreIds.add(store.storeId);
-  persistState();
 
   const now = Date.now();
+  const lastEvaluated = lastEvaluatedTimes.get(store.storeId);
+  if (lastEvaluated !== undefined && now - lastEvaluated < REEVALUATE_INTERVAL_MS) {
+    return;
+  }
   const lastNotified = lastNotifiedTimes.get(store.storeId);
   if (lastNotified !== undefined && now - lastNotified < RENOTIFY_INTERVAL_MS) {
     return;
   }
 
+  evaluatingStoreIds.add(store.storeId);
   try {
     //予定中の制限
     const member = await fetchMember(familyId, uid);
     if (member === null || isBusy(member)) {
+      lastEvaluatedTimes.set(store.storeId, now);
       return;
     }
 
@@ -259,14 +286,20 @@ async function handleStoreEntered(
 
     const targets = items.filter(item => shouldNotify(item, store, uid, homeLocation));
     if (targets.length === 0) {
+      lastEvaluatedTimes.set(store.storeId, now);
       return;
     }
 
     await notifyNearbyStore(store, targets);
+    //通知した時だけ入店済みにする
+    insideStoreIds.add(store.storeId);
     lastNotifiedTimes.set(store.storeId, now);
+    lastEvaluatedTimes.delete(store.storeId);
     persistState();
   } catch (error) {
     console.warn('geofenceMonitor: 通知の判断に失敗しました', error);
+  } finally {
+    evaluatingStoreIds.delete(store.storeId);
   }
 }
 
@@ -334,7 +367,7 @@ export function startGeofenceMonitor(familyId: string, uid: string): () => void 
 
   async function handleLocation(location: GeoPoint): Promise<void> {
     await checkStores(familyId, uid, location);
-    const registered = await handleMoved(familyId, location);
+    const registered = await handleMoved(familyId, uid, location);
     if (active && registered) {
       await checkStores(familyId, uid, location);
     }

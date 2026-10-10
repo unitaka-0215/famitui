@@ -57,7 +57,7 @@ async function fetchCandidatesFromOverpass(
     `[out:json][timeout:${OVERPASS_QUERY_TIMEOUT_SECONDS}];`,
     `node["shop"](around:${SEARCH_RADIUS_METERS},` +
       `${center.latitude},${center.longitude});`,
-    `out body ${MAX_STORES};`,
+    "out body;",
   ].join("");
 
   const response = await fetch(OVERPASS_URL, {
@@ -82,8 +82,7 @@ async function fetchCandidatesFromOverpass(
     [];
   return elements
     .map(toRawCandidate)
-    .filter((candidate) => candidate !== null)
-    .slice(0, MAX_STORES);
+    .filter((candidate) => candidate !== null);
 }
 
 // アプリ側の StoreCandidate に距離を加えたもの
@@ -277,7 +276,8 @@ export const searchNearbyStores = onCall(
     const candidates = rawCandidates
       .map((raw) => toCandidate(raw, center))
       .filter((candidate): candidate is Candidate => candidate !== null)
-      .sort((a, b) => a.distance - b.distance);
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, MAX_STORES);
     logger.info("候補を受け取りました", {
       received: rawCandidates.length,
       accepted: candidates.length,

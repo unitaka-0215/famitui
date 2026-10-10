@@ -30,6 +30,12 @@ export default function HomePage({ familyId, uid }: Props) {
   const [assignments, setAssignments] = useState<AssignmentWithId[] | null>(null);
   const [items, setItems] = useState<ItemWithId[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   //家族名を監視する
   useEffect(() => {
@@ -111,7 +117,7 @@ export default function HomePage({ familyId, uid }: Props) {
         item: itemsById.get(assignment.itemId) ?? null,
       }),
     );
-  }, [assignments, items]);
+  }, [assignments, items, now]);
 
   if (family === null || !memberLoaded || assignments === null || items === null) {
     return (

@@ -49,15 +49,13 @@ class PaymentNotificationService : NotificationListenerService() {
     }
 
     val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    val lastSbnKey = prefs.getString("lastSbnKey", null)
     val lastPaymentTime = prefs.getLong("lastPaymentTime", 0L)
-    if (lastSbnKey == sbn.key || sbn.postTime - lastPaymentTime < 5000) return
+    if (sbn.postTime - lastPaymentTime < 5000) return
 
     prefs.edit()
       .putLong("lastPaymentTime", sbn.postTime)
       .putString("lastPaymentPackage", sbn.packageName)
       .putString("lastPaymentText", body.take(200))
-      .putString("lastSbnKey", sbn.key)
       .apply()
 
     if (isDebuggable()) Log.d("PaymentNotif", "matched: $body")
@@ -76,12 +74,16 @@ class PaymentNotificationService : NotificationListenerService() {
     intent.putExtra("openPurchaseConfirm", true)
     intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
-    val pendingIntent = PendingIntent.getActivity(
-      this,
-      0,
-      intent,
-      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-    )
+    val pendingIntent = packageManager.getLaunchIntentForPackage(packageName)?.let { intent ->
+      intent.putExtra("openPurchaseConfirm", true)
+      intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      PendingIntent.getActivity(
+        this,
+        0,
+        intent,
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+      )
+    }
 
     val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_dialog_info)
